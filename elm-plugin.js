@@ -11,10 +11,11 @@ let elmCompilerSingleton = Promise.resolve();
 module.exports = (snowpackConfig, userPluginOptions) => {
   const elmModules = new Map();
   const options = sanitizeOptions(userPluginOptions);
+  const elmProjectMainFiles = new Map();
 
   return {
     name,
-    resolve: { input: ['.elm'], output: ['.js'] },
+    resolve: { input: ['.elmproj', '.elm'], output: ['.js'] },
     options,
 
     config(snowpackConfig) {
@@ -24,6 +25,25 @@ module.exports = (snowpackConfig, userPluginOptions) => {
     },
 
     async load({ filePath, isDev, isHmrEnabled }) {
+      // console.log("Plugin options?", filePath, snowpackConfig, userPluginOptions.entrypoints);
+      const fileBasePath = path.dirname(filePath);
+
+      // Replace all JS .elm imports with .elmproj imports
+      // if (/\.js$/.test(filePath)) {
+      //   let jsResult = fs.readFileSync(filePath, 'utf8');
+      //   let jsElmImportRegex = /^(\s*import .* from ")(.+\.elm)("[^"]*$)/mg;
+      //   jsResult = jsResult.replace(jsElmImportRegex, (_, a, elmFile, c) => {
+      //     let elmFilePath = path.join(fileBasePath, elmFile);
+      //     // console.log(elmFilePath);
+      //     console.info(prefix, "replacing .elm import with .elmproj import", filePath)
+      //     // console.log(elmProjectMainFiles.get(elmFilePath));
+      //     let elmProjectFile = elmProjectMainFiles.get(elmFilePath);
+
+      //     return `${a}${elmProjectFile || elmFile}${c}`;
+      //   })
+      //   return;
+      // }
+
       const file = rel(filePath);
       if (options.verbose) {
         console.info(prefix, 'aquiring lock to compile', file);
@@ -38,16 +58,42 @@ module.exports = (snowpackConfig, userPluginOptions) => {
         console.info(prefix, 'load', args);
       }
 
+      let filePaths;
+      if (/\.elmproj$/.test(filePath)) {
+        console.log(prefix, 'Elmproject', filePath);
+        filePaths = JSON.parse(fs.readFileSync(filePath, 'utf8'))[
+          'main-modules'
+        ].map((main) => {
+          let mainPath = path.join(fileBasePath, main);
+          elmProjectMainFiles.set(mainPath, filePath);
+          return mainPath;
+        });
+      } else {
+        filePaths = [filePath];
+        // const elmProjectFile = elmProjectMainFiles.get(filePath);
+        // if (elmProjectFile) {
+        //   console.info(prefix, "returning rewritten module", filePath);
+        //   releaseLock();
+        //   return `
+        //   import Elm from "${elmProjectFile}";
+        //   export default Elm;
+        //   `;
+        // }
+        // console.log("Is on elm project?", elmProjectMainFiles.get(filePath));
+      }
+
       try {
-        const result = await compile(filePath, isDev, isHmrEnabled, options);
+        const result = await compile(filePaths, isDev, isHmrEnabled, options);
 
         if (isHmrEnabled) {
           // We don't need to wait for this to finish
-          storeDependenciesForHmr(filePath, elmModules).then((deps) => {
-            if (options.verbose) {
-              console.info(prefix, file, 'imports', deps.map(rel));
-            }
-          });
+          // filePaths.forEach((filePath) => {
+          //   storeDependenciesForHmr(filePath, elmModules).then((deps) => {
+          //     if (options.verbose) {
+          //       console.info(prefix, file, 'imports', deps.map(rel));
+          //     }
+          //   });
+          // });
         }
         releaseLock();
         return result;
@@ -59,16 +105,25 @@ module.exports = (snowpackConfig, userPluginOptions) => {
 
     async onChange({ filePath }) {
       const modules = elmModules.get(filePath);
-      if (!modules) return;
-      modules.forEach((module) => {
-        if (options.verbose) {
-          console.info(
-            prefix,
-            `Will compile ${rel(module)} because ${rel(filePath)} was changed`,
-          );
+      if (modules) {
+        modules.forEach((module) => {
+          if (options.verbose) {
+            console.info(
+              prefix,
+              `Will compile ${rel(module)} because ${rel(
+                filePath,
+              )} was changed`,
+            );
+          }
+          if (typeof this.markChanged === 'function') this.markChanged(module);
+        });
+      } else {
+        const elmprojFile = elmProjectMainFiles.get(filePath);
+        if (elmprojFile) {
+          console.info(prefix, 'Marking .elmproj file as changed!');
+          this.markChanged(elmprojFile);
         }
-        if (typeof this.markChanged === 'function') this.markChanged(module);
-      });
+      }
     },
   };
 };
@@ -118,7 +173,7 @@ async function compile(filePath, isDev, isHmrEnabled, options) {
     options.optimize === 'always' || (!isDev && options.optimize === 'build');
 
   const iife = await elm
-    .compileToString([filePath], { debug, optimize })
+    .compileToString(filePath, { debug, optimize })
     .catch((err) => {
       // Snowpack tries to compile all .elm files, but the compiler needs an exposed `main`.
       // We only need to compile the main files, the compiler will resolve dependencies.
@@ -129,11 +184,11 @@ async function compile(filePath, isDev, isHmrEnabled, options) {
     });
   if (!iife) return;
 
-  if (isHmrEnabled) {
-    return toHMR(iife);
-  } else {
-    return toESM(iife);
-  }
+  // if (isHmrEnabled) {
+  //   return toHMR(iife);
+  // } else {
+  return toESM(iife);
+  // }
 }
 
 async function toHMR(step0) {
